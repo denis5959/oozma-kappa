@@ -1,0 +1,584 @@
+// - chassis mecanum + MPU-6050 -
+// funciones para moverse adelante, atras, izquierda y derecha (lateral),
+// usando el giroscopio (eje Z) para que el robot no pierda su orientación
+
+#include <Wire.h>
+#include "Adafruit_TCS34725.h"
+
+Adafruit_TCS34725 color_sensor = Adafruit_TCS34725(TCS34725_INTEGRATIONTIME_50MS, TCS34725_GAIN_4X);
+
+Adafruit_TCS34725 color_sensor = Adafruit_TCS34725(TCS34725_INTEGRATIONTIME_50MS, TCS34725_GAIN_4X);
+
+const uint16_t BLACK_CLEAR_MAX = 300;   // clear por debajo de esto = negro
+const uint16_t WHITE_CLEAR_MIN = 2000;  // clear por encima de esto = blanco
+
+enum DominantChannel { RED_DOMINANT, GREEN_DOMINANT, BLUE_DOMINANT };
+
+DominantChannel get_dominant_channel(float red_value, float green_value, float blue_value) {
+  if (red_value >= green_value && red_value >= blue_value) return RED_DOMINANT;
+  if (green_value >= red_value && green_value >= blue_value) return GREEN_DOMINANT;
+  return BLUE_DOMINANT;
+}
+
+const char* classify_red(float red_value, float green_value, float blue_value) {
+  if (blue_value > 0.4 * red_value && blue_value > 0.6 * green_value) return "Pink";
+  if (green_value > 0.7 * red_value) return "Yellow";
+  if (green_value > 0.4 * red_value) return "Orange";
+  return "Red";
+}
+
+const char* classify_green(float red_value, float green_value, float blue_value) {
+  if (red_value > 0.75 * green_value) return "Yellow";
+  if (blue_value > 0.75 * green_value) return "Cyan";
+  return "Green";
+}
+
+const char* classify_blue(float red_value, float green_value, float blue_value) {
+  if (red_value > 0.75 * blue_value) return "Purple / Magenta";
+  if (green_value > 0.75 * blue_value) return "Cyan";
+  return "Blue";
+}
+
+// Turns RGB proportions (0-255) + brightness into a simple color name
+const char* get_color_name(float red_value, float green_value, float blue_value, uint16_t clear_value) {
+  float highest_channel = max(red_value, max(green_value, blue_value));
+  float lowest_channel  = min(red_value, min(green_value, blue_value));
+  float channel_spread  = highest_channel - lowest_channel;
+
+  if (clear_value < BLACK_CLEAR_MAX) return "Black / Very dark";
+  if (channel_spread < 40) {
+    if (clear_value > WHITE_CLEAR_MIN) return "White";
+    return "Gray";
+  }
+
+  switch (get_dominant_channel(red_value, green_value, blue_value)) {
+    case RED_DOMINANT:   return classify_red(red_value, green_value, blue_value);
+    case GREEN_DOMINANT: return classify_green(red_value, green_value, blue_value);
+    case BLUE_DOMINANT:  return classify_blue(red_value, green_value, blue_value);
+  }
+  return "Unknown";
+}
+
+void read_color(float* red, float* green, float* blue, uint16_t* clear) {
+  uint16_t raw_red, raw_green, raw_blue;
+
+  color_sensor.setInterrupt(false);  // turn on the sensor's onboard light
+  delay(60);                         // takes 50ms para leerle
+  color_sensor.getRawData(&raw_red, &raw_green, &raw_blue, clear);
+  color_sensor.setInterrupt(true);   // turn off the sensor's onboard light
+
+  if (*clear == 0) {                 // avoid dividing by zero
+    *red = 0; *green = 0; *blue = 0;
+    return;
+  }
+  *red   = (float)raw_red   / *clear * 255.0;
+  *green = (float)raw_green / *clear * 255.0;
+  *blue  = (float)raw_blue  / *clear * 255.0;
+}
+
+void print_color(float red, float green, float blue, uint16_t clear) {
+  Serial.print("R: "); Serial.print((int)red);
+  Serial.print("\tG: "); Serial.print((int)green);
+  Serial.print("\tB: "); Serial.print((int)blue);
+  Serial.print("\tC: "); Serial.print(clear);
+  Serial.print("\t-> ");
+  Serial.println(get_color_name(red, green, blue, clear));
+}
+
+void init_sensor() {
+  if (color_sensor.begin()) {
+    Serial.println("Found sensor");
+  } else {
+    Serial.println("No TCS34725 found ... check your connections");
+    while (1); // halt!
+  }
+}
+
+const byte MPU = 0x68;
+
+// los offsets de calibración 
+float offsetGX = -286.506;
+float offsetGY = -109.500;
+float offsetGZ = -83.863;
+
+//recalibrar al arrancar con el robot quieto 
+const bool CALIBRAR_AL_INICIO = true;
+const int MUESTRAS_CALIBRACION = 500;
+
+//131 unidades raw equivalen a un grado por segundo (rango ±250 °/s)
+const float SENSIBILIDAD_GIRO = 131.0;
+
+// treshold para que no se acumule el error tan brutalmente
+const float ZONA_MUERTA_DPS = 0.30;
+
+//almacenar el ángulo acumulado
+float anguloX = 0.0;
+float anguloY = 0.0;
+float anguloZ = 0.0;   
+
+//velocidades angulares 
+float gxDps = 0.0;
+float gyDps = 0.0;
+float gzDps = 0.0;
+
+unsigned long tiempoAnterior = 0;
+
+//puente h delantero
+
+//motor delantero derecho
+const int IN1_DEL_DER = 4;
+const int IN2_DEL_DER = 7;
+const int ENA_DEL_DER = 3;
+
+//motor delantero izquierdo
+const int IN3_DEL_IZQ = 8;
+const int IN4_DEL_IZQ = 11;
+const int ENB_DEL_IZQ = 5;
+
+//puente h trasero
+
+//motor trasero derecho
+const int IN1_TRA_DER = 12;
+const int IN2_TRA_DER = 13;
+const int ENA_TRA_DER = 6;
+
+//motor trasero izquierdo
+const int IN3_TRA_IZQ = A0;
+const int IN4_TRA_IZQ = A1;
+const int ENB_TRA_IZQ = 9;
+
+// - inversion de motores -
+//los motores de mecanum estan encontrados,
+//conecté los cables de arriba a los Outs 1 y 3, y los de abajo a los outs 2 y 4
+const bool INV_DEL_DER = false;
+const bool INV_DEL_IZQ = true;
+const bool INV_TRA_DER = true;
+const bool INV_TRA_IZQ = false;
+
+//pwm por defecto para evitar movimientos bruscos
+const int VELOCIDAD_DEFAULT = 120;
+
+//rumbo que queremos mantener (0 = la orientación con la que arrancó)
+float anguloObjetivo = 0.0;
+
+//ganancia proporcional: cuanto pwm se corrige por cada grado de desvío
+//si zigzaguea, bájalo. si se desvía y corrige muy lento, súbelo
+const float KP = 4.0;
+
+//límite de la corrección para que no gire en seco
+const int CORRECCION_MAX = 60;
+
+//si el robot corrige hacia el lado equivocado (se desvía más), cambia a -1
+const int SIGNO_CORRECCION = 1;
+
+//cada cuánto imprimir al monitor serial (imprimir mucho frena el loop)
+const unsigned long INTERVALO_PRINT_MS = 100;
+unsigned long ultimoPrint = 0;
+
+//movimiento actual que se está ejecutando
+//velAvance: + adelante, - atras
+//velLateral: + derecha, - izquierda
+int velAvance = 0;
+int velLateral = 0;
+
+//últimos pwm mandados (para telemetría)
+int pwmDelIzq = 0, pwmDelDer = 0, pwmTraIzq = 0, pwmTraDer = 0;
+int correccionActual = 0;
+
+void escribirRegistro(byte registro, byte valor) {
+  Wire.beginTransmission(MPU);
+  Wire.write(registro);
+  Wire.write(valor);
+  Wire.endTransmission(true);
+}
+
+void configurarMPU6050() {
+  //despierta el sensor
+  escribirRegistro(0x6B, 0x00);
+
+  //filtro pasa bajas digital (~44 Hz), ayuda con la vibración de los motores
+  escribirRegistro(0x1A, 0x03);
+
+  //giroscopio a ±250 °/s
+  escribirRegistro(0x1B, 0x00);
+
+  delay(100);
+}
+
+bool leerGiroscopioRaw(int16_t &gx, int16_t &gy, int16_t &gz) {
+  Wire.beginTransmission(MPU);
+  Wire.write(0x43);
+  byte error = Wire.endTransmission(false);
+
+  if (error != 0) {
+    return false;
+  }
+
+  byte recibidos = Wire.requestFrom(MPU, (byte)6, (byte)true);
+
+  if (recibidos != 6) {
+    return false;
+  }
+
+  gx = (Wire.read() << 8) | Wire.read();
+  gy = (Wire.read() << 8) | Wire.read();
+  gz = (Wire.read() << 8) | Wire.read();
+
+  return true;
+}
+
+//promedia lecturas con el robot quieto para sacar los offsets actuales
+void calibrarGiroscopio() {
+  long sumaX = 0;
+  long sumaY = 0;
+  long sumaZ = 0;
+  int validas = 0;
+
+  Serial.println(F("Calibrando giroscopio, no muevas el robot..."));
+
+  for (int i = 0; i < MUESTRAS_CALIBRACION; i++) {
+    int16_t gx, gy, gz;
+    if (leerGiroscopioRaw(gx, gy, gz)) {
+      sumaX += gx;
+      sumaY += gy;
+      sumaZ += gz;
+      validas++;
+    }
+    delay(2);
+  }
+
+  if (validas > 0) {
+    offsetGX = (float)sumaX / validas;
+    offsetGY = (float)sumaY / validas;
+    offsetGZ = (float)sumaZ / validas;
+  }
+
+  Serial.print(F("Offsets: "));
+  Serial.print(offsetGX, 3);
+  Serial.print(F(", "));
+  Serial.print(offsetGY, 3);
+  Serial.print(F(", "));
+  Serial.println(offsetGZ, 3);
+}
+
+float aplicarZonaMuerta(float velocidadDps) {
+  if (velocidadDps > -ZONA_MUERTA_DPS &&
+      velocidadDps < ZONA_MUERTA_DPS) {
+    return 0.0;
+  }
+  return velocidadDps;
+}
+
+//lee el sensor e integra los ángulos. regresa false si falla la lectura
+bool actualizarGiroscopio() {
+  int16_t gxRaw, gyRaw, gzRaw;
+
+  if (!leerGiroscopioRaw(gxRaw, gyRaw, gzRaw)) {
+    return false;
+  }
+
+  //resta error y convierte a grados entre segundos
+  gxDps = aplicarZonaMuerta((gxRaw - offsetGX) / SENSIBILIDAD_GIRO);
+  gyDps = aplicarZonaMuerta((gyRaw - offsetGY) / SENSIBILIDAD_GIRO);
+  gzDps = aplicarZonaMuerta((gzRaw - offsetGZ) / SENSIBILIDAD_GIRO);
+
+  //el tiempo que pasó desde la medición anterior
+  unsigned long tiempoActual = micros();
+  float dt = (tiempoActual - tiempoAnterior) / 1000000.0;
+  tiempoAnterior = tiempoActual;
+
+  // ángulo = velocidad angular x tiempo
+  anguloX += gxDps * dt;
+  anguloY += gyDps * dt;
+  anguloZ += gzDps * dt;
+
+  return true;
+}
+
+//velocidad positiva es avance, negativa es retroceso
+void setMotor(int pin_in1, int pin_in2, int pin_enable,
+              int velocidad, bool invertir) {
+  velocidad = constrain(velocidad, -255, 255);
+
+  if (invertir) {
+    velocidad = -velocidad;
+  }
+
+  if (velocidad > 0) {
+    digitalWrite(pin_in1, HIGH);
+    digitalWrite(pin_in2, LOW);
+  }
+  else if (velocidad < 0) {
+    digitalWrite(pin_in1, LOW);
+    digitalWrite(pin_in2, HIGH);
+  }
+  else {
+    digitalWrite(pin_in1, LOW);
+    digitalWrite(pin_in2, LOW);
+  }
+
+  analogWrite(pin_enable, abs(velocidad));
+}
+
+void setMotorDelanteroDerecho(int velocidad) {
+  setMotor(IN1_DEL_DER, IN2_DEL_DER, ENA_DEL_DER, velocidad, INV_DEL_DER);
+}
+
+void setMotorDelanteroIzquierdo(int velocidad) {
+  setMotor(IN3_DEL_IZQ, IN4_DEL_IZQ, ENB_DEL_IZQ, velocidad, INV_DEL_IZQ);
+}
+
+void setMotorTraseroDerecho(int velocidad) {
+  setMotor(IN1_TRA_DER, IN2_TRA_DER, ENA_TRA_DER, velocidad, INV_TRA_DER);
+}
+
+void setMotorTraseroIzquierdo(int velocidad) {
+  setMotor(IN3_TRA_IZQ, IN4_TRA_IZQ, ENB_TRA_IZQ, velocidad, INV_TRA_IZQ);
+}
+
+//cinemática mecanum (rodillos en X vistos desde arriba)
+//avance: + adelante | lateral: + derecha | giro: + antihorario (izquierda)
+void moverMecanum(int avance, int lateral, int giro) {
+  int delIzq = avance + lateral - giro;
+  int delDer = avance - lateral + giro;
+  int traIzq = avance - lateral - giro;
+  int traDer = avance + lateral + giro;
+
+  //si alguna rueda se pasa de 255, escala todas para no perder la proporción
+  int maximo = max(max(abs(delIzq), abs(delDer)), max(abs(traIzq), abs(traDer)));
+  if (maximo > 255) {
+    delIzq = (long)delIzq * 255 / maximo;
+    delDer = (long)delDer * 255 / maximo;
+    traIzq = (long)traIzq * 255 / maximo;
+    traDer = (long)traDer * 255 / maximo;
+  }
+
+  setMotorDelanteroIzquierdo(delIzq);
+  setMotorDelanteroDerecho(delDer);
+  setMotorTraseroIzquierdo(traIzq);
+  setMotorTraseroDerecho(traDer);
+
+  pwmDelIzq = delIzq;
+  pwmDelDer = delDer;
+  pwmTraIzq = traIzq;
+  pwmTraDer = traDer;
+}
+
+
+void adelante(int velocidad = VELOCIDAD_DEFAULT) {
+  velAvance = abs(velocidad);
+  velLateral = 0;
+}
+
+void atras(int velocidad = VELOCIDAD_DEFAULT) {
+  velAvance = -abs(velocidad);
+  velLateral = 0;
+}
+
+//desplazamiento lateral (sin girar), lo especial de las mecanum
+void izquierda(int velocidad = VELOCIDAD_DEFAULT) {
+  velAvance = 0;
+  velLateral = -abs(velocidad);
+}
+
+void derecha(int velocidad = VELOCIDAD_DEFAULT) {
+  velAvance = 0;
+  velLateral = abs(velocidad);
+}
+
+void detener() {
+  velAvance = 0;
+  velLateral = 0;
+  moverMecanum(0, 0, 0);
+}
+
+//se llama en cada vuelta del loop: lee el gyro y aplica el movimiento
+//actual con la corrección de rumbo
+void actualizarMovimiento() {
+  if (!actualizarGiroscopio()) {
+    //si el sensor falla, por seguridad se detiene todo
+    detener();
+    Serial.println(F("Error leyendo el MPU-6050, motores detenidos"));
+    return;
+  }
+
+  //detenido: no corrige, para que no tiemble en su lugar
+  if (velAvance == 0 && velLateral == 0) {
+    correccionActual = 0;
+    moverMecanum(0, 0, 0);
+    return;
+  }
+
+  //control proporcional del rumbo
+  //si el robot gira a la izquierda (anguloZ positivo), la corrección sale
+  //negativa y lo hace girar a la derecha para regresar
+  float error = anguloObjetivo - anguloZ;
+  int correccion = (int)(KP * error * SIGNO_CORRECCION);
+  correccionActual = constrain(correccion, -CORRECCION_MAX, CORRECCION_MAX);
+
+  moverMecanum(velAvance, velLateral, correccionActual);
+}
+
+//como delay(), pero sigue leyendo el gyro y corrigiendo mientras espera
+void esperar(unsigned long ms) {
+  unsigned long inicio = millis();
+  while (millis() - inicio < ms) {
+    actualizarMovimiento();
+    imprimirTelemetria();
+    delay(5);
+  }
+}
+
+void imprimirTelemetria() {
+  unsigned long ahora = millis();
+  if (ahora - ultimoPrint < INTERVALO_PRINT_MS) {
+    return;
+  }
+  ultimoPrint = ahora;
+
+  Serial.print(F("Z: "));
+  Serial.print(anguloZ, 2);
+  Serial.print(F("°\tGiroZ: "));
+  Serial.print(gzDps, 2);
+  Serial.print(F("\tCorr: "));
+  Serial.print(correccionActual);
+  Serial.print(F("\tPWM DI/DD/TI/TD: "));
+  Serial.print(pwmDelIzq);
+  Serial.print(F("/"));
+  Serial.print(pwmDelDer);
+  Serial.print(F("/"));
+  Serial.print(pwmTraIzq);
+  Serial.print(F("/"));
+  Serial.println(pwmTraDer);
+}
+
+
+void setup() {
+  //rgb
+  Serial.begin(9600);
+  init_sensor();
+
+
+  //motores primero, para que arranquen detenidos
+  pinMode(IN1_DEL_DER, OUTPUT);
+  pinMode(IN2_DEL_DER, OUTPUT);
+  pinMode(ENA_DEL_DER, OUTPUT);
+
+  pinMode(IN3_DEL_IZQ, OUTPUT);
+  pinMode(IN4_DEL_IZQ, OUTPUT);
+  pinMode(ENB_DEL_IZQ, OUTPUT);
+
+  pinMode(IN1_TRA_DER, OUTPUT);
+  pinMode(IN2_TRA_DER, OUTPUT);
+  pinMode(ENA_TRA_DER, OUTPUT);
+
+  pinMode(IN3_TRA_IZQ, OUTPUT);
+  pinMode(IN4_TRA_IZQ, OUTPUT);
+  pinMode(ENB_TRA_IZQ, OUTPUT);
+
+  detener();
+
+  Serial.begin(115200);
+  Wire.begin(); //inicia comunicación i2c
+
+  configurarMPU6050();
+  Serial.println(F("MPU-6050 iniciado (0x68)"));
+
+  //tiempo para alejar las manos cuando ponga la batería
+  delay(2000);
+
+  //con el robot ya quieto en el piso
+  if (CALIBRAR_AL_INICIO) {
+    calibrarGiroscopio();
+  }
+
+  //la orientación actual es la que se va a mantener
+  anguloX = 0.0;
+  anguloY = 0.0;
+  anguloZ = 0.0;
+  anguloObjetivo = 0.0;
+
+  tiempoAnterior = micros();
+}
+
+void loop() {
+
+  float red, green, blue;
+  uint16_t clear;
+
+  read_color(&red, &green, &blue, &clear);
+  print_color(red, green, blue, clear);
+
+enum ColorCheckpoint { CP_NINGUNO, CP_NARANJA, CP_AQUA, CP_ROSA, CP_AMARILLO };
+
+//el color que leyó en la vuelta anterior (para no repetir el mismo checkpoint)
+ColorCheckpoint colorAnterior = CP_NINGUNO;
+
+//convierte el nombre que regresa get_color_name() a un checkpoint
+//(switch no funciona con texto en C++, por eso se compara con strcmp)
+ColorCheckpoint identificarCheckpoint(const char* nombre) {
+  if (strcmp(nombre, "Orange") == 0) return CP_NARANJA;
+  if (strcmp(nombre, "Cyan") == 0)   return CP_AQUA;
+  if (strcmp(nombre, "Pink") == 0)   return CP_ROSA;
+  if (strcmp(nombre, "Yellow") == 0) return CP_AMARILLO;
+  return CP_NINGUNO;
+}
+
+//la orientación actual pasa a ser el nuevo 0°
+void reiniciarGiroscopio() {
+  anguloX = 0.0;
+  anguloY = 0.0;
+  anguloZ = 0.0;
+  anguloObjetivo = 0.0;
+  tiempoAnterior = micros();
+}
+
+//mueve el robot en la dirección del ángulo, sin girar el chassis
+//0 = adelante, 90 = derecha, 180 = atras, 270 = izquierda
+void irHacia(int angulo, int velocidad = VELOCIDAD_DEFAULT) {
+  float rad = angulo * PI / 180.0;
+  velAvance  = (int)round(velocidad * cos(rad));
+  velLateral = (int)round(velocidad * sin(rad));
+}
+
+
+void loop() {
+  float red, green, blue;
+  uint16_t clear;
+
+  read_color(&red, &green, &blue, &clear);
+  const char* nombre = get_color_name(red, green, blue, clear);
+  ColorCheckpoint color = identificarCheckpoint(nombre);
+
+  //solo reacciona al ENTRAR a un color nuevo
+  if (color != CP_NINGUNO && color != colorAnterior) {
+    detener();
+    esperar(300);           //que se estabilice antes de reiniciar
+    reiniciarGiroscopio();
+
+    int angulo = 0;
+
+    switch (color) {
+      case CP_NARANJA:  angulo = 0;   break;  //adelante
+      case CP_AQUA:     angulo = 90;  break;  //derecha
+      case CP_ROSA:     angulo = 180; break;  //atras
+      case CP_AMARILLO: angulo = 270; break;  //izquierda
+      default: break;
+    }
+
+    Serial.print(F("Checkpoint: "));
+    Serial.print(nombre);
+    Serial.print(F(" -> "));
+    Serial.print(angulo);
+    Serial.println(F("°"));
+
+    irHacia(angulo);
+  }
+
+  colorAnterior = color;
+
+  //sigue moviéndose y corrigiendo con el gyro hasta la próxima lectura
+  esperar(40);
+}
+}
+}
