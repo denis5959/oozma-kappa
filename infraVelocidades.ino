@@ -160,21 +160,34 @@ void setup() {
 void loop() {
   bool obstaculo = detectar();
 
-  if (obstaculo) {
-    ultimaDeteccion = millis();
-   enum Estado { CRUCERO, SUBIENDO };
-   Estado estado = CRUCERO;
+  switch (estado) {
 
-  if (subiendoObstaculo && (millis() - ultimaDeteccion >= TIEMPO_OBSTACULOS)) {
-    subiendoObstaculo = false;
-    Serial.print("Obstaculo superado -> regresando a ");
-    Serial.println(VELOCIDAD_CRUCERO);
-  }
+    case CRUCERO:
+      if (obstaculo) {
+        ultimaDeteccion = millis();
+        estado = SUBIENDO;
+        Serial.print("Obstaculo detectado -> acelerando a ");
+        Serial.println(VELOCIDAD_OBSTACULOS);
+        avanzar(VELOCIDAD_OBSTACULOS);
+      } else {
+        avanzar(VELOCIDAD_CRUCERO);
+      }
+      break;
 
-  if (subiendoObstaculo) {
-    avanzar(VELOCIDAD_OBSTACULOS);
-  } else {
-    avanzar(VELOCIDAD_CRUCERO);
+    case SUBIENDO:
+      if (obstaculo) {
+        ultimaDeteccion = millis();   // sigue viendo el obstaculo, reinicia el tiempo
+      }
+
+      if (millis() - ultimaDeteccion >= TIEMPO_OBSTACULOS) {
+        estado = CRUCERO;
+        Serial.print("Obstaculo superado -> regresando a ");
+        Serial.println(VELOCIDAD_CRUCERO);
+        avanzar(VELOCIDAD_CRUCERO);
+      } else {
+        avanzar(VELOCIDAD_OBSTACULOS);
+      }
+      break;
   }
 
   delay(10);
