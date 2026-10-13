@@ -1,6 +1,26 @@
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
+
+// - configuración para la pantalla oled -
+// en el Mega: SDA = pin 20, SCL = pin 21
+#define SCREEN_WIDTH 128
+#define SCREEN_HEIGHT 64
+#define OLED_RESET -1
+#define OLED_ADDRESS 0x3C
+
+Adafruit_SSD1306 display(
+  SCREEN_WIDTH,
+  SCREEN_HEIGHT,
+  &Wire,
+  OLED_RESET
+);
+
+bool oledOK = false;   // si no hay oled, el robot sigue funcionando igual
+
 // - sensores infrarrojos -
-const int infraIZQ = 8;
-const int infraDER = 9;
+const int infraIZQ = 42;
+const int infraDER = 43;
 
 const int DETECTA = LOW; // cambiar a HIGH si el módulo IR manda HIGH al detectar
 
@@ -40,18 +60,21 @@ const bool INV_TRA_IZQ = false;
 // - velocidades -
 const int VELOCIDAD_MIN        = 70;
 const int VELOCIDAD_MAX        = 255;
-const int VELOCIDAD_CRUCERO    = 100;
-const int VELOCIDAD_OBSTACULOS = 180;
+const int VELOCIDAD_CRUCERO    = 75;
+const int VELOCIDAD_OBSTACULOS = 100;   // mas lento que crucero (no bajar de VELOCIDAD_MIN)
 
+// tiempo que sigue lento despues de dejar de ver el obstaculo
 const unsigned long TIEMPO_OBSTACULOS = 1500;
 
-bool subiendoObstaculo = false;
+enum Estado { CRUCERO, OBSTACULO };
+Estado estado = CRUCERO;
 unsigned long ultimaDeteccion = 0;
 
-// - funciones de motores -
+// para refrescar la oled solo cuando algo cambia (redibujar tarda 25 ms)
+int ultimoEstadoMostrado = -1;
+bool ultimaIzqMostrada = false;
+bool ultimaDerMostrada = false;
 
-//controla un motor individual
-//velocidad positiva es avance, negativa es retroceso, 0 es detenido
 void setMotor(int pin_in1, int pin_in2, int pin_enable, int velocidad, bool invertir) {
   velocidad = constrain(velocidad, -VELOCIDAD_MAX, VELOCIDAD_MAX);
 
@@ -59,7 +82,6 @@ void setMotor(int pin_in1, int pin_in2, int pin_enable, int velocidad, bool inve
   if (velocidad > 0 && velocidad < VELOCIDAD_MIN)  velocidad = VELOCIDAD_MIN;
   if (velocidad < 0 && velocidad > -VELOCIDAD_MIN) velocidad = -VELOCIDAD_MIN;
 
-  //invierte la direccion
   if (invertir) {
     velocidad = -velocidad;
   }
@@ -96,7 +118,6 @@ void setMotorTraseroIzquierdo(int velocidad) {
   setMotor(IN3_TRA_IZQ, IN4_TRA_IZQ, ENB_TRA_IZQ, velocidad, INV_TRA_IZQ);
 }
 
-//avance recto, cuatro motores iguales
 void avanzar(int velocidad) {
   setMotorDelanteroDerecho(velocidad);
   setMotorDelanteroIzquierdo(velocidad);
@@ -104,7 +125,6 @@ void avanzar(int velocidad) {
   setMotorTraseroIzquierdo(velocidad);
 }
 
-//detiene todo
 void detenerse() {
   setMotorDelanteroDerecho(0);
   setMotorDelanteroIzquierdo(0);
@@ -112,12 +132,71 @@ void detenerse() {
   setMotorTraseroIzquierdo(0);
 }
 
-// - sensores -
+bool detectaIzq() {
+  return digitalRead(infraIZQ) == DETECTA;
+}
 
-bool detectar() {
-  int lecturaIzq = digitalRead(infraIZQ);
-  int lecturaDer = digitalRead(infraDER);
-  return (lecturaIzq == DETECTA) || (lecturaDer == DETECTA);
+bool detectaDer() {
+  return digitalRead(infraDER) == DETECTA;
+}
+
+void mostrarMensajeOLED(const __FlashStringHelper *mensaje) {
+  if (!oledOK) return;
+
+  display.clearDisplay();
+  display.setTextColor(SSD1306_WHITE);
+  display.setTextSize(1);
+  display.setCursor(0, 20);
+  display.println(mensaje);
+  display.display();
+}
+
+void mostrarEstadoOLED(Estado est, bool izq, bool der) {
+  if (!oledOK) return;
+
+  display.clearDisplay();
+  display.setTextColor(SSD1306_WHITE);
+
+  // titulo
+  display.setTextSize(1);
+  display.setCursor(0, 0);
+  display.print(F("Oozma Kappa"));
+  display.drawLine(0, 10, 127, 10, SSD1306_WHITE);
+
+  // estado en grande (tamaño 2 -> caben 10 letras)
+  display.setTextSize(2);
+  display.setCursor(0, 15);
+  if (est == OBSTACULO) {
+    display.println(F("OBSTACULO!"));
+  } else {
+    display.println(F("Todo OK"));
+  }
+
+  // velocidad actual
+  display.setTextSize(1);
+  display.setCursor(0, 38);
+  display.print(F("Velocidad: "));
+  display.print(est == OBSTACULO ? VELOCIDAD_OBSTACULOS : VELOCIDAD_CRUCERO);
+
+  // que sensor esta viendo algo
+  display.setCursor(0, 52);
+  display.print(F("IZQ: "));
+  display.print(izq ? F("SI") : F("--"));
+  display.setCursor(64, 52);
+  display.print(F("DER: "));
+  display.print(der ? F("SI") : F("--"));
+
+  display.display();
+}
+
+// solo redibuja si cambio el estado o algun sensor
+void actualizarOLED(bool izq, bool der) {
+  if (estado != ultimoEstadoMostrado || izq != ultimaIzqMostrada || der != ultimaDerMostrada) {
+    mostrarEstadoOLED(estado, izq, der);
+    ultimoEstadoMostrado = estado;
+    ultimaIzqMostrada = izq;
+    ultimaDerMostrada = der;
+  }
 }
 
 // - configuracion -
@@ -149,7 +228,16 @@ void setup() {
   detenerse();
 
   Serial.begin(9600);
-  Serial.println("dale, todo en orden :)");
+
+  //oled: si no la encuentra, avisa por serial pero el robot sigue
+  Wire.begin();
+  oledOK = display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDRESS);
+  if (!oledOK) {
+    Serial.println(F("No se encontro OLED, sigo sin pantalla"));
+  }
+
+  mostrarMensajeOLED(F("Iniciando... aleja las manos :)"));
+  Serial.println(F("dale, todo en orden :)"));
 
   //tiempo para alejar las manos cuando ponga la batería
   delay(2000);
@@ -158,15 +246,17 @@ void setup() {
 // - programa principal -
 
 void loop() {
-  bool obstaculo = detectar();
+  bool izq = detectaIzq();
+  bool der = detectaDer();
+  bool obstaculo = izq || der;
 
   switch (estado) {
 
     case CRUCERO:
       if (obstaculo) {
         ultimaDeteccion = millis();
-        estado = SUBIENDO;
-        Serial.print("Obstaculo detectado -> acelerando a ");
+        estado = OBSTACULO;
+        Serial.print(F("Obstaculo detectado -> acelerando "));
         Serial.println(VELOCIDAD_OBSTACULOS);
         avanzar(VELOCIDAD_OBSTACULOS);
       } else {
@@ -174,14 +264,14 @@ void loop() {
       }
       break;
 
-    case SUBIENDO:
+    case OBSTACULO:
       if (obstaculo) {
         ultimaDeteccion = millis();   // sigue viendo el obstaculo, reinicia el tiempo
       }
 
       if (millis() - ultimaDeteccion >= TIEMPO_OBSTACULOS) {
         estado = CRUCERO;
-        Serial.print("Obstaculo superado -> regresando a ");
+        Serial.print(F("Obstaculo superado -> regresando a "));
         Serial.println(VELOCIDAD_CRUCERO);
         avanzar(VELOCIDAD_CRUCERO);
       } else {
@@ -189,6 +279,8 @@ void loop() {
       }
       break;
   }
+
+  actualizarOLED(izq, der);
 
   delay(10);
 }
