@@ -2,7 +2,7 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
 
-//configuración para la pantalla oled
+// Configuración para la pantalla OLED
 #define SCREEN_WIDTH 128
 #define SCREEN_HEIGHT 64
 #define OLED_RESET -1
@@ -15,87 +15,98 @@ Adafruit_SSD1306 display(
   OLED_RESET
 );
 
-//configuración para el giroscopio MPU-6050
+// Configuración para el giroscopio MPU-9250 / MPU-6050
+const byte MPU = 0x68; // AD0 a GND
 
-const byte MPU = 0x68;//AD0 a GND
+// Nuevos offsets de calibración
+const float OFFSET_GX = 233.46;
+const float OFFSET_GY = 106.81;
+const float OFFSET_GZ = 209.57;
 
-//calibracion nueva del giroscopio en base a este arreglo de robot
-const float OFFSET_GX = -308.205;
-const float OFFSET_GY = -92.243;
-const float OFFSET_GZ = -57.700;
+const float OFFSET_AX = 364.628;
+const float OFFSET_AY = -90.550;
+const float OFFSET_AZ = -19.849;
 
-const float SENSIBILIDAD_GIRO = 131.0;//rango ±250 °/s
+const float SENSIBILIDAD_GIRO = 131.0; // Rango ±250 °/s
 
-//lo agarré del otro código, ignora ruido pequeño y baja el drift
+// Zona muerta para reducir el drift
 const float ZONA_MUERTA_DPS = 0.20;
 
-//ángulo acumulado
+// Ángulo acumulado
 float angulo_x = 0.0;
 float angulo_y = 0.0;
 float angulo_z = 0.0;
 
-//variables para medir el tiempo
+// Variables para medir el tiempo
 unsigned long tiempo_anterior = 0;
 unsigned long tiempo_anterior_oled = 0;
 
-// - motores l298n: direccion y pwm -
+// ==========================================
+// - MOTORES 4x (DOBLE PUENTE H L298N) -
+// ==========================================
 
-//direccion motor izquierdo
-const int IN1_IZQ = 4;
-const int IN2_IZQ = 5;
+// Puente H Delantero
+const int IN1_DEL_DER = 53;
+const int IN2_DEL_DER = 52;
+const int ENA_DEL_DER = 4;   // PWM
 
-//direccion motor derecho
-const int IN3_DER = 6;
-const int IN4_DER = 7;
+const int IN3_DEL_IZQ = 51;
+const int IN4_DEL_IZQ = 50;
+const int ENB_DEL_IZQ = 5;   // PWM
 
-//pwm para la velocidad, ENA y ENB sin jumper(la capuchita de los puentes h)
-const int ENA_IZQ = 9;
-const int ENB_DER = 10;
+// Puente H Trasero
+const int IN1_TRA_DER = 22;
+const int IN2_TRA_DER = 23;
+const int ENA_TRA_DER = 2;   // PWM
 
-// - pid -
+const int IN3_TRA_IZQ = 24;
+const int IN4_TRA_IZQ = 25;
+const int ENB_TRA_IZQ = 3;   // PWM
 
-float KP = 7;
+// ==========================================
+// - BANDERAS DE INVERSIÓN DE MOTORES -
+// Cambia a 'true' si alguna rueda gira al revés
+// ==========================================
+const bool INV_DEL_DER = true;
+const bool INV_DEL_IZQ = true;
+const bool INV_TRA_DER = false;
+const bool INV_TRA_IZQ = false;
 
-float KI = 0.36;
+// - PID -
+float KP = 6.9;
+float KI = 0.34;
+float KD = 0.025;
 
-float KD = 0.03;
-
-//limites del pwm(por ahora)
+// Límites del PWM
 const int VELOCIDAD_MAXIMA = 130;
 const int VELOCIDAD_MINIMA = 55;
 
-//sensibilidad
+// Sensibilidad y frenadoA
 const float TOLERANCIA_GRADOS = 2.0;
-
-//empieza a frenar dentro de los ultimos 12°
 const float ZONA_FRENADO_GRADOS = 12.0;
 
-// - rumbos de prueba - (referencia a mi equipo de hackmty letsgooo)
-
-const float RUMBOS[] = { //alterna constantemente entre las direcciones
+// - Rumbos de prueba -
+const float RUMBOS[] = {
   0.0,
   90.0,
   180.0,
   270.0
 };
 
-const byte NUM_RUMBOS = 4; //elige los cuatro caminos asignados
-
+const byte NUM_RUMBOS = 4;
 byte indice_rumbo = 0;
 float angulo_objetivo = 0.0;
 
-//cambia de rumbo cada 10 segundos
-const unsigned long TIEMPO_RUMBO_MS = 10000;
+// Cambia de rumbo cada 10 segundos
+const unsigned long TIEMPO_RUMBO_MS = 3000;
 unsigned long tiempo_inicio_rumbo = 0;
 
-// - memoria del pid -
-
+// - Memoria del PID -
 float error_anterior_pid = 0.0;
 float integral_error_pid = 0.0;
 unsigned long tiempo_anterior_pid = 0;
 
-// - funciones del giroscopio -
-
+// - Funciones del Giroscopio -
 void escribirRegistro(byte registro, byte valor) {
   Wire.beginTransmission(MPU);
   Wire.write(registro);
@@ -104,12 +115,8 @@ void escribirRegistro(byte registro, byte valor) {
 }
 
 void configurarMPU6050() {
-  // Despierta el sensor.
-  escribirRegistro(0x6B, 0x00);
-
-  // Configura giroscopio en ±250 °/s.
-  escribirRegistro(0x1B, 0x00);
-
+  escribirRegistro(0x6B, 0x00); // Despierta el sensor
+  escribirRegistro(0x1B, 0x00); // Giroscopio en ±250 °/s
   delay(100);
 }
 
@@ -133,95 +140,67 @@ bool leerGiroscopioRaw(int16_t &gx, int16_t &gy, int16_t &gz) {
 }
 
 float aplicarZonaMuerta(float velocidad_dps) {
-  if (velocidad_dps > -ZONA_MUERTA_DPS &&
-      velocidad_dps < ZONA_MUERTA_DPS) {
+  if (velocidad_dps > -ZONA_MUERTA_DPS && velocidad_dps < ZONA_MUERTA_DPS) {
     return 0.0;
   }
-
   return velocidad_dps;
 }
 
-// - angulos -
-
+// - Ángulos -
 float normalizar360(float angulo) {
-  while (angulo >= 360.0) {
-    angulo -= 360.0;
-  }
-
-  while (angulo < 0.0) {
-    angulo += 360.0;
-  }
-
+  while (angulo >= 360.0) angulo -= 360.0;
+  while (angulo < 0.0) angulo += 360.0;
   return angulo;
 }
 
 float calcularErrorAngular(float objetivo, float actual) {
   float error = normalizar360(objetivo) - normalizar360(actual);
-
-  if (error > 180.0) {
-    error -= 360.0;
-  }
-
-  if (error < -180.0) {
-    error += 360.0;
-  }
-
+  if (error > 180.0) error -= 360.0;
+  if (error < -180.0) error += 360.0;
   return error;
 }
 
-// motores l298n
+// ==========================================
+// - CONTROL INDIVIDUAL DE MOTORES CON INVERSIÓN -
+// ==========================================
 
-void setMotorIzquierdo(int velocidad) {
+void enviarMotor(int in1, int in2, int ena, int velocidad, bool invertido) {
+  if (invertido) {
+    velocidad = -velocidad;
+  }
+  
   velocidad = constrain(velocidad, -255, 255);
 
   if (velocidad > 0) {
-    digitalWrite(IN1_IZQ, HIGH);
-    digitalWrite(IN2_IZQ, LOW);
-  } 
-  else if (velocidad < 0) {
-    digitalWrite(IN1_IZQ, LOW);
-    digitalWrite(IN2_IZQ, HIGH);
-  } 
-  else {
-    digitalWrite(IN1_IZQ, LOW);
-    digitalWrite(IN2_IZQ, LOW);
+    digitalWrite(in1, HIGH);
+    digitalWrite(in2, LOW);
+  } else if (velocidad < 0) {
+    digitalWrite(in1, LOW);
+    digitalWrite(in2, HIGH);
+  } else {
+    digitalWrite(in1, LOW);
+    digitalWrite(in2, LOW);
   }
 
-  analogWrite(ENA_IZQ, abs(velocidad));
+  analogWrite(ena, abs(velocidad));
 }
 
-void setMotorDerecho(int velocidad) {
-  velocidad = constrain(velocidad, -255, 255);
+void setLadoIzquierdo(int velocidad) {
+  enviarMotor(IN3_DEL_IZQ, IN4_DEL_IZQ, ENB_DEL_IZQ, velocidad, INV_DEL_IZQ);
+  enviarMotor(IN3_TRA_IZQ, IN4_TRA_IZQ, ENB_TRA_IZQ, velocidad, INV_TRA_IZQ);
+}
 
-  if (velocidad > 0) {
-    digitalWrite(IN3_DER, HIGH);
-    digitalWrite(IN4_DER, LOW);
-  } 
-  else if (velocidad < 0) {
-    digitalWrite(IN3_DER, LOW);
-    digitalWrite(IN4_DER, HIGH);
-  } 
-  else {
-    digitalWrite(IN3_DER, LOW);
-    digitalWrite(IN4_DER, LOW);
-  }
-
-  analogWrite(ENB_DER, abs(velocidad));
+void setLadoDerecho(int velocidad) {
+  enviarMotor(IN1_DEL_DER, IN2_DEL_DER, ENA_DEL_DER, velocidad, INV_DEL_DER);
+  enviarMotor(IN1_TRA_DER, IN2_TRA_DER, ENA_TRA_DER, velocidad, INV_TRA_DER);
 }
 
 void detenerMotores() {
-  analogWrite(ENA_IZQ, 0);
-  analogWrite(ENB_DER, 0);
-
-  digitalWrite(IN1_IZQ, LOW);
-  digitalWrite(IN2_IZQ, LOW);
-
-  digitalWrite(IN3_DER, LOW);
-  digitalWrite(IN4_DER, LOW);
+  setLadoIzquierdo(0);
+  setLadoDerecho(0);
 }
 
-//pid
-
+// - PID -
 void reiniciarPID() {
   error_anterior_pid = 0.0;
   integral_error_pid = 0.0;
@@ -229,99 +208,56 @@ void reiniciarPID() {
 }
 
 void actualizarControlRumboPID() {
-  float error = calcularErrorAngular(
-    angulo_objetivo,
-    angulo_z
-  );
+  float error = calcularErrorAngular(angulo_objetivo, angulo_z);
 
   unsigned long ahora = millis();
   float dt_pid = (ahora - tiempo_anterior_pid) / 1000.0;
 
-  if (dt_pid <= 0.0) {
-    dt_pid = 0.001;
-  }
-
+  if (dt_pid <= 0.0) dt_pid = 0.001;
   tiempo_anterior_pid = ahora;
 
-  //si ya llegó lo suficientemente cerca, se detiene
   if (abs(error) <= TOLERANCIA_GRADOS) {
     detenerMotores();
-
     integral_error_pid = 0.0;
     error_anterior_pid = error;
-
     return;
   }
 
-  //solo acumula integral si ya esta relativamente cerca, para evitar movimientos bruscos
-  //esto baja el riesgo de integral wind-up
   if (abs(error) < 25.0) {
     integral_error_pid += error * dt_pid;
-  } 
-  else {
+  } else {
     integral_error_pid = 0.0;
   }
 
-  integral_error_pid = constrain(
-    integral_error_pid,
-    -80.0,
-    80.0
-  );
+  integral_error_pid = constrain(integral_error_pid, -80.0, 80.0);
 
-  float derivada = (
-    error - error_anterior_pid
-  ) / dt_pid;
-
+  float derivada = (error - error_anterior_pid) / dt_pid;
   error_anterior_pid = error;
 
-  //salida del pid a los motores
-  float salida = (KP * error)
-               + (KI * integral_error_pid)
-               + (KD * derivada);
+  float salida = (KP * error) + (KI * integral_error_pid) + (KD * derivada);
 
-  //reduce el pwm maximo conforme se va acercando
-  //sin multiplicar la salida por otro factor despues
   float proporcion = abs(error) / ZONA_FRENADO_GRADOS;
+  proporcion = constrain(proporcion, 0.0, 1.0);
 
-  proporcion = constrain(
-    proporcion,
-    0.0,
-    1.0
-  );
+  float limite_pwm = VELOCIDAD_MINIMA + proporcion * (VELOCIDAD_MAXIMA - VELOCIDAD_MINIMA);
 
-  float limite_pwm = VELOCIDAD_MINIMA +
-    proporcion *
-    (VELOCIDAD_MAXIMA - VELOCIDAD_MINIMA);
+  salida = constrain(salida, -limite_pwm, limite_pwm);
 
-  salida = constrain(
-    salida,
-    -limite_pwm,
-    limite_pwm
-  );
-
-  //mientras no llegue, mantener fuerza minima para vencer la friccion y corregir ese valorcito
   if (abs(salida) < VELOCIDAD_MINIMA) {
-    salida = (salida >= 0)
-      ? VELOCIDAD_MINIMA
-      : -VELOCIDAD_MINIMA;
+    salida = (salida >= 0) ? VELOCIDAD_MINIMA : -VELOCIDAD_MINIMA;
   }
 
-  //giro sobre su propio eje
-  setMotorIzquierdo(-(int)salida);
-  setMotorDerecho((int)salida);
+  // Giro sobre su propio eje (lados opuestos)
+  setLadoIzquierdo(-(int)salida);
+  setLadoDerecho((int)salida);
 }
-
-// secuencia de rumbos
 
 void siguienteRumbo() {
   indice_rumbo++;
-
   if (indice_rumbo >= NUM_RUMBOS) {
     indice_rumbo = 0;
   }
-
   angulo_objetivo = RUMBOS[indice_rumbo];
-
   reiniciarPID();
 
   Serial.print(F("NUEVO OBJETIVO: "));
@@ -329,15 +265,14 @@ void siguienteRumbo() {
   Serial.println(F(" grados"));
 }
 
-// - funciones de la oled -
-
+// - OLED -
 void mostrarOLED(float grados_z, float velocidad_z) {
   display.clearDisplay();
   display.setTextColor(SSD1306_WHITE);
 
   display.setTextSize(1);
   display.setCursor(0, 0);
-  display.println(F("giro carrito :D"));
+  display.println(F("giro carrito 4x :D"));
 
   display.drawLine(0, 11, 127, 11, SSD1306_WHITE);
 
@@ -363,14 +298,11 @@ void mostrarOLED(float grados_z, float velocidad_z) {
 void mostrarErrorOLED(const __FlashStringHelper *mensaje) {
   display.clearDisplay();
   display.setTextColor(SSD1306_WHITE);
-
   display.setTextSize(1);
   display.setCursor(0, 20);
   display.println(F("ERROR:"));
-
   display.setCursor(0, 35);
   display.println(mensaje);
-
   display.display();
 }
 
@@ -378,75 +310,61 @@ void setup() {
   Serial.begin(115200);
   Wire.begin();
 
-  if (!display.begin(
-        SSD1306_SWITCHCAPVCC,
-        OLED_ADDRESS
-      )) {
-
+  if (!display.begin(SSD1306_SWITCHCAPVCC, OLED_ADDRESS)) {
     Serial.println(F("No se encontro OLED"));
-
-    while (true) {
-      delay(100);
-    }
+    while (true) { delay(100); }
   }
 
   display.clearDisplay();
   display.setTextColor(SSD1306_WHITE);
   display.setTextSize(1);
   display.setCursor(0, 20);
-  display.println(F("Iniciando..."));
+  display.println(F("Iniciando con offsets..."));
   display.display();
 
   configurarMPU6050();
 
-  pinMode(IN1_IZQ, OUTPUT);
-  pinMode(IN2_IZQ, OUTPUT);
-  pinMode(ENA_IZQ, OUTPUT);
+  // Configurar pines de los motores delanteros
+  pinMode(IN1_DEL_DER, OUTPUT);
+  pinMode(IN2_DEL_DER, OUTPUT);
+  pinMode(ENA_DEL_DER, OUTPUT);
+  pinMode(IN3_DEL_IZQ, OUTPUT);
+  pinMode(IN4_DEL_IZQ, OUTPUT);
+  pinMode(ENB_DEL_IZQ, OUTPUT);
 
-  pinMode(IN3_DER, OUTPUT);
-  pinMode(IN4_DER, OUTPUT);
-  pinMode(ENB_DER, OUTPUT);
+  // Configurar pines de los motores traseros
+  pinMode(IN1_TRA_DER, OUTPUT);
+  pinMode(IN2_TRA_DER, OUTPUT);
+  pinMode(ENA_TRA_DER, OUTPUT);
+  pinMode(IN3_TRA_IZQ, OUTPUT);
+  pinMode(IN4_TRA_IZQ, OUTPUT);
+  pinMode(ENB_TRA_IZQ, OUTPUT);
 
   detenerMotores();
 
-  //la direccion inicial se toma como 0°
   angulo_z = 0.0;
-
   indice_rumbo = 0;
   angulo_objetivo = RUMBOS[indice_rumbo];
 
   tiempo_anterior = micros();
   tiempo_inicio_rumbo = millis();
-
   reiniciarPID();
 
-  Serial.println(F("Robot listo"));
-  Serial.println(F("ENA D9 | ENB D10"));
-  Serial.println(F("Prueba: 0 -> 30 -> 0 grados"));
-
+  Serial.println(F("Robot listo con nuevos offsets de MPU!"));
   delay(800);
 }
 
 void loop() {
-  int16_t gx_raw;
-  int16_t gy_raw;
-  int16_t gz_raw;
+  int16_t gx_raw, gy_raw, gz_raw;
 
-  if (!leerGiroscopioRaw(
-        gx_raw,
-        gy_raw,
-        gz_raw
-      )) {
-
-    Serial.println(F("Error leyendo MPU-6050"));
-    mostrarErrorOLED(F("MPU-6050"));
+  if (!leerGiroscopioRaw(gx_raw, gy_raw, gz_raw)) {
+    Serial.println(F("Error leyendo MPU"));
+    mostrarErrorOLED(F("MPU-9250"));
     detenerMotores();
-
     delay(500);
     return;
   }
 
-  //aplicar los offsets y convertir de raw a °/s
   float gx_dps = (gx_raw - OFFSET_GX) / SENSIBILIDAD_GIRO;
   float gy_dps = (gy_raw - OFFSET_GY) / SENSIBILIDAD_GIRO;
   float gz_dps = (gz_raw - OFFSET_GZ) / SENSIBILIDAD_GIRO;
@@ -456,9 +374,7 @@ void loop() {
   gz_dps = aplicarZonaMuerta(gz_dps);
 
   unsigned long tiempo_actual = micros();
-
   float dt = (tiempo_actual - tiempo_anterior) / 1000000.0;
-
   tiempo_anterior = tiempo_actual;
 
   angulo_x += gx_dps * dt;
@@ -473,25 +389,19 @@ void loop() {
   actualizarControlRumboPID();
 
   float rumbo_actual = normalizar360(angulo_z);
+  float error_actual = calcularErrorAngular(angulo_objetivo, angulo_z);
 
-  float error_actual = calcularErrorAngular(
-    angulo_objetivo,
-    angulo_z
-  );
-
+  // Impresión en monitor serie para calibración del PID
   Serial.print(F("Rumbo: "));
   Serial.print(rumbo_actual, 2);
-
   Serial.print(F(" | Objetivo: "));
   Serial.print(angulo_objetivo, 1);
-
   Serial.print(F(" | Error: "));
   Serial.print(error_actual, 2);
-
   Serial.print(F(" | Vel Z: "));
   Serial.println(gz_dps, 2);
 
-  //actualiza el oled 10 veces por segundo
+  // Actualiza la OLED 10 veces por segundo
   if (millis() - tiempo_anterior_oled >= 100) {
     tiempo_anterior_oled = millis();
     mostrarOLED(angulo_z, gz_dps);
@@ -499,4 +409,3 @@ void loop() {
 
   delay(20);
 }
-//gracias 
