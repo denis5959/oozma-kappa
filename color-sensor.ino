@@ -19,9 +19,8 @@ Adafruit_SSD1306 display(
 // - sensor de color TCS34725 (direccion 0x29, no choca con la oled) -
 Adafruit_TCS34725 color_sensor = Adafruit_TCS34725(TCS34725_INTEGRATIONTIME_50MS, TCS34725_GAIN_4X);
 
-// Calibra estos dos valores con tu sensor
+// Calibra este valor con tu sensor
 const uint16_t BLACK_CLEAR_MAX = 300;   // clear por debajo de esto = negro
-const uint16_t WHITE_CLEAR_MIN = 2000;  // clear por encima de esto = blanco
 
 enum DominantChannel { RED_DOMINANT, GREEN_DOMINANT, BLUE_DOMINANT };
 
@@ -34,7 +33,7 @@ DominantChannel get_dominant_channel(float red_value, float green_value, float b
 const char* classify_red(float red_value, float green_value, float blue_value) {
   if (blue_value > 0.4 * red_value && blue_value > 0.6 * green_value) return "Pink";
   if (green_value > 0.7 * red_value) return "Yellow";
-  if (green_value > 0.4 * red_value) return "Orange";
+  if (green_value > 0.275 * red_value) return "Orange";  // rojo da ~0.25, naranja ~0.30, corte en medio
   return "Red";
 }
 
@@ -57,10 +56,7 @@ const char* get_color_name(float red_value, float green_value, float blue_value,
   float channel_spread  = highest_channel - lowest_channel;
 
   if (clear_value < BLACK_CLEAR_MAX) return "Black / Very dark";
-  if (channel_spread < 40) {
-    if (clear_value > WHITE_CLEAR_MIN) return "White";
-    return "Gray";
-  }
+  if (channel_spread < 45) return "White";  // sin gris, tu blanco da ~32
 
   switch (get_dominant_channel(red_value, green_value, blue_value)) {
     case RED_DOMINANT:   return classify_red(red_value, green_value, blue_value);
@@ -213,4 +209,4 @@ void loop() {
 
   delay(500);  // slow down output so it's readable
 }
-//WORKSSSSSSSS legoooooo
+// falta checar el cyan y el rosa pero en la cancha real
