@@ -13,7 +13,11 @@ const int ECHO_IZQ      = 49;
 const int TRIG_DER      = 46;
 const int ECHO_DER      = 47;
 
-const float DISTANCIA_PARED = 5.0;   // cm para considerar que hay pared
+// CAMBIO: umbrales separados para frente y lados.
+// Lado: (ancho de casilla - ancho del robot) / 2 + margen. Con 5 cm casi nunca
+// veia las paredes laterales y por eso tomaba decisiones equivocadas.
+const float DISTANCIA_PARED_FRENTE = 7.0;    // cm (calibrar)
+const float DISTANCIA_PARED_LADO   = 12.0;   // cm (calibrar)
 
 
 // ================== SENSORES INFRARROJOS (OBSTACULOS) ==================
@@ -44,6 +48,9 @@ float colorR = 0, colorG = 0, colorB = 0;
 uint16_t colorC = 0;
 const char* colorActual = "---";
 
+// CAMBIO: color de la casilla final (revisar en el monitor serial que salga asi)
+const char* COLOR_META = "Red";
+
 
 // ================== MOTORES (ORUGAS TIPO TANQUE) ==================
 // puente h delantero
@@ -70,7 +77,11 @@ const bool INV_TRA_DER = false;
 const bool INV_TRA_IZQ = false;
 
 const unsigned long TIEMPO_RETROCESO   = 300;   // ms que retrocede en callejon (calibrar)
-const unsigned long TIEMPO_AVANCE_GIRO = 400;   
+const unsigned long TIEMPO_AVANCE_GIRO = 400;   // ms que avanza despues de girar (calibrar)
+
+// CAMBIO: cuando se abre un hueco a la derecha con el frente libre, el sensor lo ve
+// antes de que el robot llegue al centro de la casilla. Avanza esto antes de girar.
+const unsigned long TIEMPO_AVANCE_PRE_GIRO = 250;   // ms (calibrar: ~media casilla)
 
 // - correccion de rumbo al ir derecho -
 const float KP_RECTO       = 3.0;
@@ -363,7 +374,7 @@ void avanzarDurante(unsigned long ms) {
   while (millis() - inicio < ms) {
     actualizarGiro();
     actualizarObstaculos();
-    if (medirDistancia(TRIG_ADELANTE, ECHO_ADELANTE) < DISTANCIA_PARED) break;
+    if (medirDistancia(TRIG_ADELANTE, ECHO_ADELANTE) < DISTANCIA_PARED_FRENTE) break;
     avanzarRecto();
     delay(5);
   }
@@ -475,6 +486,34 @@ float medirDistancia(int trigPin, int echoPin) {
   return duracion * 0.0343 / 2;
 }
 
+// CAMBIO: mide los 3 sensores y arma el byte de paredes (Adelante-Izq-Der)
+byte leerParedes(float &dA, float &dI, float &dD) {
+  dA = medirDistancia(TRIG_ADELANTE, ECHO_ADELANTE);
+  esperar(10);
+  dI = medirDistancia(TRIG_IZQ, ECHO_IZQ);
+  esperar(10);
+  dD = medirDistancia(TRIG_DER, ECHO_DER);
+  actualizarGiro();
+
+  bool paredAdelante = dA < DISTANCIA_PARED_FRENTE;
+  bool paredIzq      = dI < DISTANCIA_PARED_LADO;
+  bool paredDer      = dD < DISTANCIA_PARED_LADO;
+
+  return (paredAdelante << 2) | (paredIzq << 1) | paredDer;
+}
+
+// CAMBIO: casos que hacen que el robot gire o se detenga a maniobrar
+bool esCasoDeManiobra(byte paredes) {
+  switch (paredes) {
+    case 0b010:
+    case 0b100:
+    case 0b101:
+    case 0b110:
+    case 0b111: return true;
+    default:    return false;
+  }
+}
+
 const char* nombreCaso(byte paredes) {
   static const char* const casos[8] = {
     "0b000", "0b001", "0b010", "0b011",
@@ -483,12 +522,13 @@ const char* nombreCaso(byte paredes) {
   return casos[paredes & 0b111];
 }
 
+// CAMBIO: regla de la mano derecha
 const char* accionCaso(byte paredes) {
   switch (paredes) {
     case 0b111: return "CALLEJON";
     case 0b010:
-    case 0b110: return "GIRO DER";
     case 0b100:
+    case 0b110: return "GIRO DER";
     case 0b101: return "GIRO IZQ";
     default:    return "ADELANTE";
   }
@@ -594,6 +634,26 @@ void mostrarMensajeOLED(const __FlashStringHelper *linea1, const __FlashStringHe
   display.display();
 }
 
+// NUEVO: detiene el robot para siempre y muestra "FIN" grande en la oled
+void finLaberinto() {
+  detenerMotores();
+  Serial.println(F("Callejon con ROJO -> FIN"));
+
+  if (oledOK) {
+    display.clearDisplay();
+    display.setTextColor(SSD1306_WHITE);
+    display.setTextSize(4);                 // cada letra mide 24x32 px
+    display.setCursor((SCREEN_WIDTH - 3 * 24) / 2, (SCREEN_HEIGHT - 32) / 2);
+    display.print(F("FIN"));
+    display.display();
+  }
+
+  while (true) {
+    detenerMotores();
+    delay(1000);
+  }
+}
+
 
 // ================== SETUP ==================
 
@@ -661,20 +721,35 @@ void loop() {
   actualizarObstaculos();
   actualizarColor();
 
-  float dAdelante = medirDistancia(TRIG_ADELANTE, ECHO_ADELANTE);
-  esperar(10);
-  float dIzq = medirDistancia(TRIG_IZQ, ECHO_IZQ);
-  esperar(10);
-  float dDer = medirDistancia(TRIG_DER, ECHO_DER);
-  actualizarGiro();
+  // DESACTIVADO: antes se detenia al ver rojo en cualquier lugar.
+  // Ahora solo se detiene si es callejon sin salida (0b111) Y el color es rojo
+  // (ver el case 0b111 del switch de abajo).
+  // if (colorOK && strcmp(colorActual, COLOR_META) == 0) {
+  //   detenerMotores();
+  //   Serial.println(F("META alcanzada"));
+  //   mostrarMensajeOLED(F("META"), F("Casilla final"));
+  //   while (true) { delay(1000); }
+  // }
 
-  bool paredAdelante = dAdelante < DISTANCIA_PARED;
-  bool paredIzq      = dIzq      < DISTANCIA_PARED;
-  bool paredDer      = dDer      < DISTANCIA_PARED;
-
-  byte paredes = (paredAdelante << 2) | (paredIzq << 1) | paredDer;
+  float dAdelante, dIzq, dDer;
+  byte paredes = leerParedes(dAdelante, dIzq, dDer);
   // 3 digitos: 1 = hay pared, 0 = libre (Adelante-Izq-Der)
   // Ejemplo: 0b110 = pared adelante e izquierda, derecha libre
+
+  // CAMBIO: antes de girar confirma con una segunda lectura, para que un eco
+  // falso no lo haga girar donde no es
+  if (esCasoDeManiobra(paredes)) {
+    detenerMotores();
+    esperar(30);
+    float a2, i2, d2;
+    byte confirmacion = leerParedes(a2, i2, d2);
+    if (confirmacion != paredes) {
+      avanzarRecto();   // lecturas inconsistentes: sigue derecho y vuelve a medir
+      esperar(20);
+      return;
+    }
+    dAdelante = a2; dIzq = i2; dDer = d2;
+  }
 
   const char* caso   = nombreCaso(paredes);
   const char* accion = accionCaso(paredes);
@@ -708,12 +783,28 @@ void loop() {
     mostrarOLED(dAdelante, dIzq, dDer, paredes, caso, accion);
   }
 
+  // ===== REGLA DE LA MANO DERECHA =====
+  // 1) si la derecha esta libre -> derecha
+  // 2) si no, si el frente esta libre -> adelante
+  // 3) si no, si la izquierda esta libre -> izquierda
+  // 4) si todo esta cerrado -> media vuelta
   switch (paredes) {
 
     case 0b111:   // callejon sin salida
       Serial.println(F("Callejon sin salida"));
       detenerMotores();
       esperar(200);
+
+      // NUEVO: ya parado, hace una lectura de color fresca (sin esperar el
+      // intervalo de 200 ms). Si es rojo, es la meta: se detiene y muestra FIN
+      if (colorOK) {
+        read_color(&colorR, &colorG, &colorB, &colorC);
+        colorActual = get_color_name(colorR, colorG, colorB, colorC);
+        tiempo_anterior_color = millis();
+        if (strcmp(colorActual, COLOR_META) == 0) {
+          finLaberinto();   // no regresa
+        }
+      }
 
       retroceder();
       esperar(TIEMPO_RETROCESO);
@@ -723,12 +814,23 @@ void loop() {
       mostrarOLED(dAdelante, dIzq, dDer, paredes, caso, "GIRANDO");
       mediaVuelta();
       esperar(100);
+      avanzarDurante(TIEMPO_AVANCE_GIRO);
 
       casoAnterior = "";
       break;
 
-    case 0b010:
-    case 0b110:   // derecha libre
+    case 0b010:   // frente libre, pared izq, derecha libre:
+                  // el hueco se ve antes de llegar al centro, avanza y luego gira
+      avanzarDurante(TIEMPO_AVANCE_PRE_GIRO);
+      esperar(100);
+      girarDerecha();
+      esperar(100);
+      avanzarDurante(TIEMPO_AVANCE_GIRO);
+      casoAnterior = "";
+      break;
+
+    case 0b100:   // CAMBIO: antes giraba a la izquierda, ahora prioriza la derecha
+    case 0b110:   // pared adelante, derecha libre
       detenerMotores();
       esperar(100);
       girarDerecha();
@@ -737,8 +839,7 @@ void loop() {
       casoAnterior = "";
       break;
 
-    case 0b100:
-    case 0b101:   // izquierda libre
+    case 0b101:   // solo la izquierda libre
       detenerMotores();
       esperar(100);
       girarIzquierda();
@@ -747,7 +848,10 @@ void loop() {
       casoAnterior = "";
       break;
 
-    default:      // camino libre: avanza manteniendo el rumbo
+    case 0b001:   // pared a la derecha, frente libre
+    case 0b011:   // pasillo
+    case 0b000:   // zona abierta: sigue derecho para no dar vueltas en circulo
+    default:
       avanzarRecto();
       break;
   }
