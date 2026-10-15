@@ -27,6 +27,10 @@ enum DominantChannel { RED_DOMINANT, GREEN_DOMINANT, BLUE_DOMINANT };
 // Calibra este valor con tu sensor
 const uint16_t BLACK_CLEAR_MAX = 300;   // clear por debajo de esto = negro
 
+// Umbral para separar rojo de naranja (calibrado con tus lecturas)
+// Rojo da ~0.06-0.08, naranja da ~0.24-0.28
+const float ORANGE_MIN_RATIO = 0.16;    // (G - B) / R
+
 // Función para seleccionar el canal del multiplexor PCA9548A
 void tcaselect(uint8_t i) {
   if (i > 7) return;
@@ -44,7 +48,11 @@ DominantChannel get_dominant_channel(float red_value, float green_value, float b
 const char* classify_red(float red_value, float green_value, float blue_value) {
   if (blue_value > 0.4 * red_value && blue_value > 0.6 * green_value) return "Pink";
   if (green_value > 0.7 * red_value) return "Yellow";
-  if (green_value > 0.275 * red_value) return "Orange"; 
+
+  // Qué tanto sobresale el verde sobre el azul, relativo al rojo
+  float orange_ratio = (green_value - blue_value) / red_value;
+  if (orange_ratio > ORANGE_MIN_RATIO) return "Orange";
+
   return "Red";
 }
 
