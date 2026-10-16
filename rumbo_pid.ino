@@ -20,9 +20,9 @@ Adafruit_SSD1306 display(
 
 const byte MPU = 0x68;
 
-const float OFFSET_GX = 233.46;
-const float OFFSET_GY = 106.81;
-const float OFFSET_GZ = 213.86;
+const float OFFSET_GX = 237.754;
+const float OFFSET_GY = 119.490;
+const float OFFSET_GZ = 211.570;
 
 const float OFFSET_AX = 364.628;
 const float OFFSET_AY = -90.550;
@@ -59,12 +59,12 @@ const bool INV_DEL_IZQ = true;
 const bool INV_TRA_DER = false;
 const bool INV_TRA_IZQ = false;
 
-float KP = 6;
+float KP = 6.2;
 float KI = 0.34;
 float KD = 0.025;
 
-const int VELOCIDAD_MAXIMA = 65;
-const int VELOCIDAD_MINIMA = 28;
+const int VELOCIDAD_MAXIMA = 56;
+const int VELOCIDAD_MINIMA = 30;
 
 const float TOLERANCIA_GRADOS = 2.0;
 const float ZONA_FRENADO_GRADOS = 12.0;
