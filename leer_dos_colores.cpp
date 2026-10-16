@@ -31,6 +31,13 @@ const uint16_t BLACK_CLEAR_MAX = 300;   // clear por debajo de esto = negro
 // Rojo da ~0.06-0.08, naranja da ~0.24-0.28
 const float ORANGE_MIN_RATIO = 0.16;    // (G - B) / R
 
+// --- NUEVO: Umbrales para separar verde de amarillo cuando domina el verde ---
+// Tus lecturas de verde: R/G = 0.57 - 0.79, B/G = 0.51 - 0.60
+// El amarillo real tiene mucho rojo Y poco azul.
+const float YELLOW_RG_STRONG = 0.85;    // R/G mayor a esto = amarillo seguro
+const float YELLOW_RG_WEAK   = 0.75;    // R/G entre WEAK y STRONG = amarillo solo si hay poco azul
+const float YELLOW_BG_MAX    = 0.50;    // B/G menor a esto = poco azul (típico del amarillo)
+
 // Función para seleccionar el canal del multiplexor PCA9548A
 void tcaselect(uint8_t i) {
   if (i > 7) return;
@@ -56,8 +63,17 @@ const char* classify_red(float red_value, float green_value, float blue_value) {
   return "Red";
 }
 
+// --- MODIFICADO: ahora usa rojo Y azul para decidir entre verde y amarillo ---
 const char* classify_green(float red_value, float green_value, float blue_value) {
-  if (red_value > 0.75 * green_value) return "Yellow";
+  float rg = red_value  / green_value;   // cuánto rojo hay respecto al verde
+  float bg = blue_value / green_value;   // cuánto azul hay respecto al verde
+
+  // Amarillo claro: casi tanto rojo como verde
+  if (rg > YELLOW_RG_STRONG) return "Yellow";
+
+  // Zona dudosa: solo es amarillo si además tiene poco azul
+  if (rg > YELLOW_RG_WEAK && bg < YELLOW_BG_MAX) return "Yellow";
+
   if (blue_value > 0.75 * green_value) return "Cyan";
   return "Green";
 }
@@ -100,6 +116,22 @@ void read_color(Adafruit_TCS34725 &sensor, uint8_t canal, float* red, float* gre
   *red   = (float)raw_red   / *clear * 255.0;
   *green = (float)raw_green / *clear * 255.0;
   *blue  = (float)raw_blue  / *clear * 255.0;
+}
+
+// --- NUEVO: imprime valores y proporciones por serie para calibrar ---
+void imprimirDebug(const char* etiqueta, const char* nombre, float r, float g, float b, uint16_t c) {
+  Serial.print(etiqueta);
+  Serial.print(F(" -> "));
+  Serial.print(nombre);
+  Serial.print(F("  R:")); Serial.print((int)r);
+  Serial.print(F(" G:"));  Serial.print((int)g);
+  Serial.print(F(" B:"));  Serial.print((int)b);
+  Serial.print(F(" C:"));  Serial.print(c);
+  if (g > 0) {
+    Serial.print(F("  R/G:")); Serial.print(r / g, 2);
+    Serial.print(F(" B/G:"));  Serial.print(b / g, 2);
+  }
+  Serial.println();
 }
 
 // - Funciones de la OLED (Canal 4) -
@@ -195,11 +227,9 @@ void loop() {
   read_color(tcs2, 3, &r2, &g2, &b2, &clear2);
   const char* name2 = get_color_name(r2, g2, b2, clear2);
 
-  // Imprimir por puerto serie
-  Serial.print(F("S1 -> "));
-  Serial.print(name1);
-  Serial.print(F(" | S2 -> "));
-  Serial.println(name2);
+  // Imprimir por puerto serie (con valores y proporciones para calibrar)
+  imprimirDebug("S1", name1, r1, g1, b1, clear1);
+  imprimirDebug("S2", name2, r2, g2, b2, clear2);
 
   // Mostrar ambos en la OLED (Canal 4)
   mostrarOLED(name1, r1, g1, b1, name2, r2, g2, b2);
